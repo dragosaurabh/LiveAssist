@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Sidebar from '../components/Sidebar';
 import ActionModal from '../components/ActionModal';
 import type { Issue } from '../store/sessionStore';
+import { useGemini } from '../hooks/useGemini';
 import {
     Upload,
     FileImage,
@@ -17,53 +18,18 @@ import {
     Zap,
 } from 'lucide-react';
 
-const mockAnalysisResults: Issue[] = [
-    {
-        id: 'a1',
-        title: 'Low Color Contrast on CTA',
-        description: 'Button text "#aaa" on "#eee" background fails WCAG AA (ratio 1.94:1). Minimum required is 4.5:1.',
-        severity: 'critical',
-        confidence: 0.96,
-        suggestedFix: { file: 'button.css', patch: '.cta-btn {\n  color: #1a1a1a;\n  background: #3b82f6;\n}', explanation: 'Use high-contrast color pairing', confidence: 0.96 },
-        status: 'detected',
-    },
-    {
-        id: 'a2',
-        title: 'Missing ARIA Labels on Form',
-        description: 'Input fields lack aria-label or associated <label> elements, making the form inaccessible.',
-        severity: 'critical',
-        confidence: 0.93,
-        suggestedFix: { file: 'form.tsx', patch: '<label htmlFor="email">Email</label>\n<input id="email" aria-required="true" />', explanation: 'Add semantic labels to all form inputs', confidence: 0.93 },
-        status: 'detected',
-    },
-    {
-        id: 'a3',
-        title: 'Improper Heading Hierarchy',
-        description: 'Page jumps from <h1> to <h4>, skipping h2 and h3. This breaks screen reader navigation.',
-        severity: 'warning',
-        confidence: 0.89,
-        suggestedFix: { file: 'page.tsx', patch: '<h1>Dashboard</h1>\n<h2>Overview</h2>\n<h3>Recent Activity</h3>', explanation: 'Use sequential heading levels without skipping', confidence: 0.89 },
-        status: 'detected',
-    },
-    {
-        id: 'a4',
-        title: 'Small Tap Target',
-        description: 'Close button is 24x24px. WCAG recommends a minimum target size of 44x44px for touch devices.',
-        severity: 'warning',
-        confidence: 0.85,
-        suggestedFix: { file: 'modal.css', patch: '.close-btn {\n  min-width: 44px;\n  min-height: 44px;\n  padding: 10px;\n}', explanation: 'Increase tap target to 44px minimum', confidence: 0.85 },
-        status: 'detected',
-    },
-    {
-        id: 'a5',
-        title: 'Layout Misalignment',
-        description: 'Footer links are not vertically centered due to inconsistent line-height values.',
-        severity: 'info',
-        confidence: 0.78,
-        suggestedFix: { file: 'footer.css', patch: '.footer-links {\n  display: flex;\n  align-items: center;\n  line-height: 1.5;\n}', explanation: 'Normalize line-height for consistent alignment', confidence: 0.78 },
-        status: 'detected',
-    },
-];
+function fileToBase64(file: File): Promise<{ base64: string; mimeType: string }> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            const base64 = result.split(',')[1];
+            resolve({ base64, mimeType: file.type });
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
 
 export default function AnalyzerPage() {
     const [uploadedImage, setUploadedImage] = useState<string | null>(null);
@@ -72,32 +38,44 @@ export default function AnalyzerPage() {
     const [showActionModal, setShowActionModal] = useState(false);
     const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const { analyze } = useGemini();
+
+    const processFile = async (file: File) => {
+        const url = URL.createObjectURL(file);
+        setUploadedImage(url);
+        setIsAnalyzing(true);
+        try {
+            const { base64, mimeType } = await fileToBase64(file);
+            const result = await analyze(base64, mimeType);
+            const detectedIssues: Issue[] = result.issues.map((issue: any, idx: number) => ({
+                id: issue.id || `a${idx + 1}`,
+                title: issue.title,
+                description: issue.description,
+                severity: issue.severity,
+                confidence: issue.confidence,
+                boundingBox: issue.boundingBox,
+                suggestedFix: issue.suggestedFix,
+                status: 'detected' as const,
+            }));
+            setIssues(detectedIssues);
+        } catch {
+            setIssues([]);
+        } finally {
+            setIsAnalyzing(false);
+        }
+    };
 
     const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const url = URL.createObjectURL(file);
-        setUploadedImage(url);
-
-        // Simulate analysis
-        setIsAnalyzing(true);
-        setTimeout(() => {
-            setIssues(mockAnalysisResults);
-            setIsAnalyzing(false);
-        }, 2000);
+        processFile(file);
     };
 
     const handleDrop = (e: React.DragEvent) => {
         e.preventDefault();
         const file = e.dataTransfer.files?.[0];
         if (!file || !file.type.startsWith('image/')) return;
-        const url = URL.createObjectURL(file);
-        setUploadedImage(url);
-        setIsAnalyzing(true);
-        setTimeout(() => {
-            setIssues(mockAnalysisResults);
-            setIsAnalyzing(false);
-        }, 2000);
+        processFile(file);
     };
 
     const handleApply = (issue: Issue) => {

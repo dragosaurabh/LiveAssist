@@ -1,10 +1,12 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Sidebar from '../components/Sidebar';
 import ActionModal from '../components/ActionModal';
 import HandoffModal from '../components/HandoffModal';
 import { useSessionStore } from '../store/sessionStore';
 import type { Issue } from '../store/sessionStore';
+import { useGemini } from '../hooks/useGemini';
+import { useVoice } from '../hooks/useVoice';
 import {
     Send,
     Upload,
@@ -25,55 +27,6 @@ import {
     Gauge,
 } from 'lucide-react';
 
-// Mock issues for demo
-const mockIssues: Issue[] = [
-    {
-        id: 'iss_1',
-        title: 'Button Alignment Issue',
-        description: 'The login button is misaligned due to parent flex container using flex-start instead of center.',
-        severity: 'critical',
-        confidence: 0.94,
-        boundingBox: { x: 120, y: 80, width: 180, height: 45, label: 'Misaligned Button', color: 'red' },
-        suggestedFix: {
-            file: 'login.css',
-            patch: '.login-container {\n  display: flex;\n  justify-content: center;\n  align-items: center;\n}',
-            explanation: 'Change justify-content to center to fix button alignment.',
-            confidence: 0.94,
-        },
-        status: 'detected',
-    },
-    {
-        id: 'iss_2',
-        title: 'Low Color Contrast',
-        description: 'Text color #999 on background #fff has a contrast ratio of 2.85:1, below the WCAG AA minimum of 4.5:1.',
-        severity: 'warning',
-        confidence: 0.88,
-        boundingBox: { x: 300, y: 160, width: 140, height: 30, label: 'Low Contrast', color: 'yellow' },
-        suggestedFix: {
-            file: 'theme.css',
-            patch: '.subtitle {\n  color: #595959; /* 7:1 contrast ratio */\n}',
-            explanation: 'Darken text color to meet WCAG AA contrast requirements.',
-            confidence: 0.88,
-        },
-        status: 'detected',
-    },
-    {
-        id: 'iss_3',
-        title: 'Missing ARIA Label',
-        description: 'The search input field lacks an aria-label attribute, making it inaccessible to screen readers.',
-        severity: 'info',
-        confidence: 0.82,
-        boundingBox: { x: 80, y: 240, width: 200, height: 35, label: 'Missing ARIA', color: 'blue' },
-        suggestedFix: {
-            file: 'search.tsx',
-            patch: '<input\n  type="search"\n  aria-label="Search"\n  placeholder="Search..."\n/>',
-            explanation: 'Add aria-label to make the input accessible to screen readers.',
-            confidence: 0.82,
-        },
-        status: 'detected',
-    },
-];
-
 const initialMessages = [
     {
         role: 'system' as const,
@@ -82,17 +35,45 @@ const initialMessages = [
     },
 ];
 
+function fileToBase64(file: File): Promise<{ base64: string; mimeType: string }> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            const base64 = result.split(',')[1];
+            resolve({ base64, mimeType: file.type });
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
 export default function WorkspacePage() {
-    const { messages, issues, uploadedImage, isRecording, addMessage, setIssues, setUploadedImage, setRecording, applyFix, undoFix } = useSessionStore();
+    const { messages, issues, uploadedImage, addMessage, setIssues, setUploadedImage, applyFix, undoFix } = useSessionStore();
+    const { analyze, chat, isLoading } = useGemini();
     const [inputText, setInputText] = useState('');
     const [zoom, setZoom] = useState(1);
     const [showActionModal, setShowActionModal] = useState(false);
     const [showHandoffModal, setShowHandoffModal] = useState(false);
     const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [currentImageBase64, setCurrentImageBase64] = useState<string | null>(null);
+    const [currentMimeType, setCurrentMimeType] = useState<string>('image/png');
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const initialized = useRef(false);
+
+    // Voice recognition
+    const { isListening, transcript, isSupported, toggleListening } = useVoice({
+        onTranscript: useCallback((text: string) => {
+            addMessage({ role: 'user', content: `🎤 ${text}`, type: 'voice' });
+            chat(text).then((result) => {
+                addMessage({ role: 'assistant', content: result.content, type: 'text' });
+            }).catch(() => {
+                addMessage({ role: 'assistant', content: 'I heard you but had trouble responding. Could you try again?', type: 'text' });
+            });
+        }, [addMessage, chat]),
+    });
 
     // Initialize session
     useEffect(() => {
@@ -106,41 +87,60 @@ export default function WorkspacePage() {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    const handleSend = () => {
+    const handleSend = async () => {
         if (!inputText.trim()) return;
-        addMessage({ role: 'user', content: inputText, type: 'text' });
-
-        // Simulate AI response
-        setTimeout(() => {
-            addMessage({
-                role: 'assistant',
-                content: 'I can see the UI issues. Let me analyze the screenshot and highlight the problems I detect.',
-                type: 'text',
-            });
-        }, 800);
-
+        const text = inputText;
         setInputText('');
+        addMessage({ role: 'user', content: text, type: 'text' });
+
+        try {
+            const result = await chat(text, currentImageBase64 || undefined, currentImageBase64 ? currentMimeType : undefined);
+            addMessage({ role: 'assistant', content: result.content, type: 'text' });
+        } catch {
+            addMessage({ role: 'assistant', content: 'Sorry, I encountered an error. Please try again.', type: 'text' });
+        }
     };
 
-    const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
         const url = URL.createObjectURL(file);
         setUploadedImage(url);
         addMessage({ role: 'user', content: 'Uploaded a screenshot for analysis.', type: 'image', imageUrl: url });
 
-        // Simulate analysis
+        // Convert to base64 and call real API
         setIsAnalyzing(true);
-        setTimeout(() => {
-            setIssues(mockIssues);
-            setIsAnalyzing(false);
+        try {
+            const { base64, mimeType } = await fileToBase64(file);
+            setCurrentImageBase64(base64);
+            setCurrentMimeType(mimeType);
+            const result = await analyze(base64, mimeType);
+            const detectedIssues: Issue[] = result.issues.map((issue: any, idx: number) => ({
+                id: issue.id || `iss_${idx + 1}`,
+                title: issue.title,
+                description: issue.description,
+                severity: issue.severity,
+                confidence: issue.confidence,
+                boundingBox: issue.boundingBox,
+                suggestedFix: issue.suggestedFix,
+                status: 'detected' as const,
+            }));
+
+            setIssues(detectedIssues);
+            const issueList = detectedIssues
+                .map((i) => `• **${i.title}** (${i.severity}, ${Math.round(i.confidence * 100)}% confidence)`)
+                .join('\n');
             addMessage({
                 role: 'assistant',
-                content: `Analysis complete! I found ${mockIssues.length} issues:\n\n• **Button Alignment Issue** (Critical, 94% confidence)\n• **Low Color Contrast** (Warning, 88% confidence)\n• **Missing ARIA Label** (Info, 82% confidence)\n\nCheck the Suggested Fixes panel on the right for detailed patches.`,
+                content: `Analysis complete! I found ${detectedIssues.length} issues:\n\n${issueList}\n\nCheck the Suggested Fixes panel on the right for detailed patches.`,
                 type: 'analysis',
-                issues: mockIssues,
+                issues: detectedIssues,
             });
-        }, 2500);
+        } catch (err) {
+            addMessage({ role: 'assistant', content: 'Analysis failed. Please try uploading again.', type: 'text' });
+        } finally {
+            setIsAnalyzing(false);
+        }
     };
 
     const handleApplyFix = (issue: Issue) => {
@@ -158,6 +158,32 @@ export default function WorkspacePage() {
                 type: 'text',
             });
         }
+    };
+
+    const handleDownloadReport = () => {
+        const report = {
+            session_id: `sess_${Date.now().toString(36)}`,
+            timestamp: new Date().toISOString(),
+            issues_found: issues.length,
+            fixes_applied: issues.filter((i) => i.status === 'applied').length,
+            confidence: issues.length > 0
+                ? Math.round((issues.reduce((sum, i) => sum + i.confidence, 0) / issues.length) * 100) / 100
+                : 0,
+            issues: issues.map((i) => ({
+                title: i.title,
+                severity: i.severity,
+                confidence: i.confidence,
+                status: i.status,
+                fix: i.suggestedFix?.patch || null,
+            })),
+        };
+        const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `liveassist-report-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
     };
 
     const performanceScore = issues.length > 0
@@ -189,7 +215,10 @@ export default function WorkspacePage() {
                             <Users className="w-3.5 h-3.5" />
                             Handoff
                         </button>
-                        <button className="btn-secondary !py-2 !px-4 text-xs flex items-center gap-1.5">
+                        <button
+                            onClick={handleDownloadReport}
+                            className="btn-secondary !py-2 !px-4 text-xs flex items-center gap-1.5"
+                        >
                             <Download className="w-3.5 h-3.5" />
                             Report
                         </button>
@@ -231,7 +260,7 @@ export default function WorkspacePage() {
                                     </motion.div>
                                 ))}
                             </AnimatePresence>
-                            {isAnalyzing && (
+                            {(isAnalyzing || isLoading) && (
                                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
                                     <div className="glass-light rounded-2xl rounded-bl-md px-4 py-3 flex items-center gap-2">
                                         <div className="flex gap-1">
@@ -239,7 +268,22 @@ export default function WorkspacePage() {
                                             <div className="w-2 h-2 rounded-full bg-primary-400 animate-bounce" style={{ animationDelay: '150ms' }} />
                                             <div className="w-2 h-2 rounded-full bg-primary-400 animate-bounce" style={{ animationDelay: '300ms' }} />
                                         </div>
-                                        <span className="text-xs text-surface-400">Analyzing screenshot...</span>
+                                        <span className="text-xs text-surface-400">
+                                            {isAnalyzing ? 'Analyzing with Gemini AI...' : 'Thinking...'}
+                                        </span>
+                                    </div>
+                                </motion.div>
+                            )}
+                            {isListening && (
+                                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+                                    <div className="glass-light rounded-2xl rounded-bl-md px-4 py-3">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <div className="w-2 h-2 rounded-full bg-red-400 pulse-live" />
+                                            <span className="text-xs text-red-400 font-medium">Listening...</span>
+                                        </div>
+                                        {transcript && (
+                                            <span className="text-xs text-surface-400 italic">{transcript}</span>
+                                        )}
                                     </div>
                                 </motion.div>
                             )}
@@ -263,11 +307,12 @@ export default function WorkspacePage() {
                                     <Upload className="w-4 h-4 text-surface-400" />
                                 </button>
                                 <button
-                                    onClick={() => setRecording(!isRecording)}
-                                    className={`w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${isRecording ? 'bg-red-500/20 text-red-400' : 'bg-surface-800 hover:bg-surface-700 text-surface-400'
+                                    onClick={toggleListening}
+                                    className={`w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${isListening ? 'bg-red-500/20 text-red-400' : 'bg-surface-800 hover:bg-surface-700 text-surface-400'
                                         }`}
+                                    title={isSupported ? 'Toggle voice input' : 'Voice not supported in this browser'}
                                 >
-                                    {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                                    {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
                                 </button>
                                 <div className="flex-1 relative">
                                     <input
@@ -276,11 +321,13 @@ export default function WorkspacePage() {
                                         onKeyDown={(e) => e.key === 'Enter' && handleSend()}
                                         placeholder="Ask about UI issues..."
                                         className="w-full bg-surface-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder:text-surface-500 border border-white/5 focus:border-primary-500/50 focus:outline-none transition-colors"
+                                        disabled={isLoading}
                                     />
                                 </div>
                                 <button
                                     onClick={handleSend}
-                                    className="w-9 h-9 rounded-xl bg-primary-600 hover:bg-primary-500 flex items-center justify-center transition-colors"
+                                    disabled={isLoading}
+                                    className="w-9 h-9 rounded-xl bg-primary-600 hover:bg-primary-500 flex items-center justify-center transition-colors disabled:opacity-50"
                                 >
                                     <Send className="w-4 h-4 text-white" />
                                 </button>
@@ -303,10 +350,10 @@ export default function WorkspacePage() {
                                                 animate={{ opacity: issue.status === 'applied' ? 0.3 : 1, scale: 1 }}
                                                 className="absolute"
                                                 style={{
-                                                    left: issue.boundingBox.x,
-                                                    top: issue.boundingBox.y,
-                                                    width: issue.boundingBox.width,
-                                                    height: issue.boundingBox.height,
+                                                    left: `${issue.boundingBox.x}%`,
+                                                    top: `${issue.boundingBox.y}%`,
+                                                    width: `${issue.boundingBox.width}%`,
+                                                    height: `${issue.boundingBox.height}%`,
                                                 }}
                                             >
                                                 <div
@@ -374,7 +421,10 @@ export default function WorkspacePage() {
                                     <Monitor className="w-3.5 h-3.5" />
                                     Screen Share
                                 </button>
-                                <button className="btn-secondary !py-2 !px-4 text-xs flex items-center gap-1.5">
+                                <button
+                                    onClick={handleDownloadReport}
+                                    className="btn-secondary !py-2 !px-4 text-xs flex items-center gap-1.5"
+                                >
                                     <Download className="w-3.5 h-3.5" />
                                     Download
                                 </button>
