@@ -14,7 +14,6 @@ import {
     ZoomOut,
     Monitor,
     Download,
-    ChevronRight,
     Sparkles,
     AlertTriangle,
     CheckCircle2,

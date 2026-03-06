@@ -19,7 +19,7 @@ const fadeUp = {
     visible: (i: number) => ({
         opacity: 1,
         y: 0,
-        transition: { delay: i * 0.08, duration: 0.5, ease: [0.22, 1, 0.36, 1] },
+        transition: { delay: i * 0.08, duration: 0.5, ease: [0.22, 1, 0.36, 1] as const },
     }),
 };
 
@@ -160,18 +160,18 @@ export default function DashboardPage() {
                                             <td className="px-6 py-4">
                                                 <span
                                                     className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${session.status === 'completed'
-                                                            ? 'badge-success'
-                                                            : session.status === 'active'
-                                                                ? 'badge-info'
-                                                                : 'badge-warning'
+                                                        ? 'badge-success'
+                                                        : session.status === 'active'
+                                                            ? 'badge-info'
+                                                            : 'badge-warning'
                                                         }`}
                                                 >
                                                     <span
                                                         className={`w-1.5 h-1.5 rounded-full ${session.status === 'completed'
-                                                                ? 'bg-emerald-400'
-                                                                : session.status === 'active'
-                                                                    ? 'bg-blue-400 pulse-live'
-                                                                    : 'bg-amber-400'
+                                                            ? 'bg-emerald-400'
+                                                            : session.status === 'active'
+                                                                ? 'bg-blue-400 pulse-live'
+                                                                : 'bg-amber-400'
                                                             }`}
                                                     />
                                                     {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
